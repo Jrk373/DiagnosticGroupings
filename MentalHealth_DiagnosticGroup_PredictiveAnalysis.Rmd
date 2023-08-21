@@ -1,0 +1,830 @@
+---
+title: "The Predictiveness of Mental Health Diagnostic Groupings on High Cost Claim Frequency"
+author: "John Ryan Kivela, MA"
+subtitle: "*Northern Arizona Regional Behavioral Health Alliance <br> Flagstaff, AZ*"
+date: '`r Sys.Date()`'
+output: 
+  html_document:
+      theme: cerulean
+      toc: yes
+      toc_float: yes
+      toc_depth: 2
+      toc_collapsed: no
+      code_folding: show
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+```
+
+```{r Load Packages and Libraries, echo=FALSE, message=FALSE, warning=FALSE}
+# Load Packages and Libraries
+library(tidyverse)
+library(psych)
+library(jtools)
+library(kableExtra)
+library(broom.mixed)
+library(stargazer)
+library(gtsummary)
+library(gt)
+```
+
+```{r load data, echo=FALSE, message=FALSE}
+ICD10_Groupings_Original <- read_csv("Data_Files/ICD10 BH Groupings.csv")
+Claims_IPClaimsPerAdmission <- read_csv("Data_Files/20221231_FUH_ClaimsHx_FY20221 - R2.csv")  
+InpatientCodeDescriptions <- read_csv("Data_Files/My2022_InpatientCodesDesc.csv")
+ICD10DxAndGroupsCombined <- read_csv("Data_Files/ICD10andBHGroupingsCombined.csv")
+```
+
+```{r Create Objects, include=FALSE}
+#Knitting Yarn
+DateExtracted <- "12/31/22"
+
+ClaimsAdjudicatedThrough <- "October 1, 2021 to September 30, 2022"
+
+RegressionModel <- "Predicted High Cost Claim Score = `(F10-F19)` + `(F20-F29)` + `(F30-F39)` + `(F40-F48)` + `(F60-F69)` + `(F90-F98)` + `(F80-F89)` + `(F01-F09)`, Note: `(F50-F59)`# removed b/c contains only NA"
+
+Provider_ShortName <- (c("CBI", "CPIH", "EHS", "LCBHC", "MMHC", 
+                           "SHG", "SBH", "TGC", "Polara"))
+# Wrangle the data
+IPCodeDesciptions <- InpatientCodeDescriptions %>% 
+  rename("svccode" = "InpatientCode")
+
+Knitting <- data.frame(
+                  DateExtracted,
+                  ClaimsAdjudicatedThrough,
+                  RegressionModel
+                  )
+
+```
+
+```{r create_distribution_table, echo=FALSE, message=FALSE, warning=FALSE}
+# Filter claims for only facility and Alliance Providers
+Tab_DxAnalysis <- Claims_IPClaimsPerAdmission %>% 
+  filter(svccode < 300) %>%  #filters to only facility claims
+  filter(ra %in% Provider_ShortName) #filters to Alliance Providers
+
+# Join claims table with My2022 IP Code Descriptions 
+Tab_DxAnalysis <- left_join(x = Tab_DxAnalysis,
+                            y = IPCodeDesciptions,
+                            by = "svccode",
+                            keep = TRUE)
+
+# Join Tab_Dx table with ICD10 Diagnosis Grouping table
+TestTab_DxAnalysis <- left_join(x = Tab_DxAnalysis,
+                            y = ICD10DxAndGroupsCombined,
+                            by = "primaryDiagnosis",
+                            keep = TRUE)
+
+# Select variables for analysis
+TestTab_DxAnalysis <- TestTab_DxAnalysis %>% 
+  select(ID,
+         svcdate,
+         primaryDiagnosis.x,
+         svccode.x,
+         units,
+         calcnetpd,
+         ra,
+         DiagnosisGroupRange,
+         Diagnosis_Group
+         )
+```
+
+```{r descriptive_statistics, echo=FALSE, message=FALSE}
+# Descriptive Statistics
+Descriptive_Stats <- as.data.frame(round(describe(TestTab_DxAnalysis$calcnetpd), digits = 2))
+
+# Create a Data frame for key descriptive statistics
+Mean_CalcnetPd <- Descriptive_Stats$mean
+SD_CalcnetPd <- Descriptive_Stats$sd
+Outlier_Cutoff = Mean_CalcnetPd + (3*SD_CalcnetPd)
+n_Stats <- Descriptive_Stats$n
+
+# Remove Outliers
+TestTabDx_Outliers <- TestTab_DxAnalysis %>% 
+  filter(calcnetpd >= Outlier_Cutoff)
+
+TestTabDx_NoOutliers <- TestTab_DxAnalysis %>% 
+  filter(calcnetpd <= Outlier_Cutoff)
+
+# Count the outliers
+Outliers <- nrow(TestTabDx_Outliers)
+
+# Run updated descriptive stats with no outliers. 
+Descriptive_Stats2 <- as.data.frame(round(describe(TestTabDx_NoOutliers$calcnetpd), digits = 2))
+
+# Create a Data frame for key descriptive statistics
+Mean_CalcnetPd2 <- Descriptive_Stats2$mean
+SD_CalcnetPd2 <- Descriptive_Stats2$sd
+n_Stats2 <- Descriptive_Stats2$n
+
+AllStats <- data.frame(Mean_CalcnetPd,
+                       Mean_CalcnetPd2,
+                       SD_CalcnetPd,
+                       SD_CalcnetPd2,
+                       Outliers,
+                       Outlier_Cutoff,
+                       n_Stats,
+                       n_Stats2,
+                       RegressionModel)
+
+Allstats <- mutate(AllStats, as.numeric(n_Stats))
+
+options(scipen = 999, show.signif.stars = TRUE)
+
+AllStats <- AllStats %>% 
+  mutate(Mean_CalcnetPd = scales::dollar(Mean_CalcnetPd)) %>% 
+  mutate(Mean_CalcnetPd2 = scales::dollar(Mean_CalcnetPd2)) %>% 
+  mutate(SD_CalcnetPd = scales::dollar(SD_CalcnetPd)) %>% 
+  mutate(SD_CalcnetPd2 = scales::dollar(SD_CalcnetPd2)) %>% 
+  mutate(Outlier_Cutoff = scales::dollar(Outlier_Cutoff)) 
+
+```
+
+```{r Regression_InitialRegression, echo=FALSE, message=FALSE}
+# Regression Analysis Diagnosis Group Range by Calcnetpd
+RegressionTest <- TestTabDx_NoOutliers %>%
+  group_by(svcdate, DiagnosisGroupRange) %>%
+  summarise(sum_calcnetpd = sum(calcnetpd, na.rm = FALSE)) %>%
+  pivot_wider(names_from = DiagnosisGroupRange,
+              values_from = sum_calcnetpd)
+
+# Regression Analysis Diagnosis Group by Calcnetpd
+# Create a dataframe for thhe sum of calcnetpd for the entire svcdate
+SumCalcnetPd <- TestTabDx_NoOutliers %>% 
+  group_by(svcdate) %>% 
+  summarise(calcnetpd = sum(calcnetpd, na.rm = FALSE) )
+
+# Join Sumcalcnetpd and regression test table
+RegressionTest <- inner_join(x = RegressionTest,
+                             y = SumCalcnetPd,
+                             by = "svcdate")
+
+# change any NA values to 0
+RegressionTest[is.na(RegressionTest)] = 0
+
+# run the regression
+# plot(RegressionTest)
+
+simple.regression <- lm(formula = calcnetpd ~ `(F10-F19)`
+                        + `(F20-F29)` + `(F30-F39)`
+                        + `(F40-F48)` + `(F60-F69)`
+                        + `(F90-F98)` 
+                        + `(F80-F89)`
+                        # + `(F50-F59)`# removed b/c contains only NA
+                        + `(F01-F09)`,
+                        data = RegressionTest)
+
+# summary(simple.regression)
+
+```
+
+```{r Regression_SecondaryRegression, echo=FALSE, message=FALSE}
+# Secondary Regression Test
+RegressionTest2 <- RegressionTest %>% 
+  select(svcdate,
+         `(F20-F29)`,
+         `(F30-F39)`,
+         calcnetpd)
+
+simple.regression2 <- lm(formula = calcnetpd ~ `(F20-F29)` + `(F30-F39)`,
+                        data = RegressionTest2)
+
+# summary(simple.regression2)
+
+```
+
+# Abstract
+
+This study is an analysis of adjudicated claims for Alliance ACO
+Providers in the Northern Region of Arizona. The purpose of this
+investigation is to identify areas of focus for program development and
+clinical advancement by identifying predictive variables from the most
+recent contract year, 2021-2022.
+
+A predictive analysis of high cost claims and ICD10 mental health
+groupings was conducted showing that *Schizophrenia, schizotypal,
+delusional, and other non-mood psychotic disorders* (F20-F29) and *Mood
+[affective] disorders* (F30-F39) are strong predictors of high cost
+claims.
+
+# Hypothesis
+
+Recent feedback from Alliance ACO Providers, and the recent results of
+the Alliance ACO Progress Report, support a closer analysis of the
+factors impacting inpatient admissions for mental health conditions.
+While the Alliance as a whole demonstrated an above average performance
+for the 6 month baseline period, some individual providers failed to
+meet the NCQA Mean for Follow-Up After Hospitalization for Mental
+Illness (FUH)[^1].
+
+[^1]: Kivela J.R., McMillian, J. & Tewa, V. (2023) Alliance ACO Progress
+    Report, January 2023. *The Northern Arizona Regional Behavioral
+    Health Authority*.
+
+This study hypothesizes that different diagnostic groupings of mental
+health disorders may have a greater impact on high cost claims. These
+insights will help the Alliance develop data-driven interventions for
+groups at greater risk of high cost claims.
+
+# Method
+
+## Data Management, transparency, and integrity
+
+The Alliance collects referential data through direct query of curated
+BCBSAZ hosted servers and databases. As such, the data has, at a
+minimum, the level of security and validation offered by BCBSAZ
+services.
+
+Data is stored using Microsoft Office 365 cloud storage. Office 365 uses
+several encryption protocols, including Transport Layer Security/Secure
+Sockets Layer (TSL/SSL), Internet Protocol Security (IPSec), and
+Advanced Encryption Standard (AES). Office 365 data encryption applies
+to data at rest (data stored in One Drive for Business or SharePoint
+libraries) and data in transit (mail messages, notes from online
+meetings, or whenever a device is communicating within or between
+servers[^2].
+
+[^2]: Encryption in Microsoft 365 - Microsoft Purview (Compliance), 2022
+
+### *Description of the data sample*
+
+This sample includes adjudicated claims from BCBSAZ for the period of
+`r Knitting$ClaimsAdjudicatedThrough`. The population includes
+individuals with an adjudicated claim for a HEDIS My2022 qualifying
+inpatient code associated with a HEDIS My2022 qualifying mental health
+diagnosis[^3]. The sample is filtered to only include claims for BCBSAZ
+AHCCCS Complete Care members with residential addresses in the Northern
+Geographical Service Area. The sample is further differentiated by
+including only contracted Alliance Providers.
+
+[^3]: <https://www.ncqa.org/hedis/>
+
+The sample size was `r AllStats$n_Stats`.
+
+## Preparation of Data for Analysis
+
+The data was extracted from the BCBSAZ data warehouse on
+`r DateExtracted` using SQL Management Studio. The SQL Code is available
+for review on request. After extraction, the data was reviewed for
+errors, such as duplications or NULL values. The original data is stored
+in encrypted folders. Prior to analysis the data was de-identified by
+converting date of birth to age, converting date of service to a
+month/year format, and creating an alternative ID in lieu of patient
+name or BCBSAZ ID.
+
+### Preparing the data in R
+
+Data files were loaded to the model:
+
+-   De-identified claims history from the Contract Year 2021 - 2022
+
+-   Reference tables for:
+
+    -   ICD10 codes
+
+    -   HEDIS My 2022 qualifying inpatient codes[^4]
+
+    -   ICD 10 code groupings for mental health which will be used in a
+        regression analysis[^5].
+
+[^4]: <https://www.ncqa.org/hedis/>
+
+[^5]: ICD-10-CM official guidelines for coding and reporting. (n.d.).
+    Retrieved January 18, 2023, from
+    <https://www.cms.gov/files/document/fy-2022-icd-10-cm-coding-guidelines-updated-02012022.pdf>
+
+```{r load_data, echo=FALSE, message=FALSE}
+# load data
+```
+
+Reference objects were created and some data was renamed to assist in
+data frame construction and analysis.
+
+```{r createobjects, echo=FALSE, message=FALSE}
+# create objects
+```
+
+A date frame was created from the claims history, which was joined with
+ICD10 mental health grouping identifiers and inpatient service codes
+based on primary diagnosis.
+
+```{r distributiontable, echo=FALSE, message=FALSE}
+# create distribution table
+```
+
+# Results
+
+## Assessment of Cost Distribution for All Providers and MH Groups
+
+A series of analyses were conducted to observe the overall distribution
+of high cost claims according to Alliance Provider and mental health
+diagnostic grouping.
+
+### *Preliminary analysis*
+
+First, a basic histogram for cost of claim was plotted to observe the
+distribution of data. This provided a very clear visual indicator that
+the distribution is negatively skewed to the right by a small number of
+high cost outliers. Bin width for the histogram was set to \$1,000.
+
+$~$
+
+```{r preliminary_analyses_histogram, echo=FALSE, message=FALSE, warning=FALSE}
+ggplot(TestTab_DxAnalysis,
+       aes(x = calcnetpd)) +
+  geom_histogram(binwidth = 1000,
+                 color="#000775", 
+                 fill="#e1e7fa")+
+  geom_vline(aes(xintercept = mean(calcnetpd)), 
+             color ="#9a0138", 
+             size=.5)+
+  geom_text(x = 13919,
+            y = 8000,
+            label = "Mean = $13,919",
+            color = "#9a0138",
+            hjust  = -.05)+
+    theme_grey()+
+    theme(axis.text.y = element_text(size = 6),
+          strip.text.y = element_text(angle = 360)
+          )+
+          # scale_y_continuous(labels = scales::percent)+
+          labs(title = "Histogram: Preliminary Analysis of High Cost Claims",
+               #subtitle = "subtitle",
+               caption = "SOURCE: BCBSAZ Adjudicated Claims, Oct 2021 - Sep 2022")+
+          xlab(label = "Cost per Claim (dollars)")+
+          ylab(label = "Number of Claims")
+          
+```
+
+$~$
+
+The distribution of cost was further investigated by expanding the
+histogram to create facets for each mental health grouping of ICD10
+codes[^6]. These results further demonstrated the data being skewed to
+the right by very few cases.
+
+[^6]: ICD-10-CM official guidelines for coding and reporting. (n.d.).
+    Retrieved January 18, 2023, from
+    <https://www.cms.gov/files/document/fy-2022-icd-10-cm-coding-guidelines-updated-02012022.pdf>
+
+In addition, it was noted that the distribution appears to be
+concentrated in the psychotic disorders, and mood disorders groups,
+(F20-F29) and (F30-F39).
+
+$~$
+
+```{r preliminary_analyses_histogram_mentalhealthgroupings, echo=FALSE, message=FALSE}
+ggplot(TestTab_DxAnalysis,
+       aes(x = calcnetpd)) +
+  geom_histogram(
+    binwidth = 1000,
+    color="#000775", 
+    fill="#e1e7fa"
+    )+
+    facet_grid(rows = vars(DiagnosisGroupRange))+
+  geom_vline(aes(xintercept = mean(calcnetpd)), 
+             color ="#9a0138", 
+             size=.5)+
+  geom_text(x = 13919,
+            y = 8000,
+            label = "Mean = $13,919",
+            color = "#9a0138",
+            hjust  = -.02)+
+    theme_grey()+
+    theme(axis.text.y = element_text(size = 6),
+               strip.text.y = element_text(angle = 360)
+                )+
+             # scale_y_continuous(labels = scales::percent)+
+    labs(title = "Histogram: Cost per Claim by Diagnostic Grouping",
+         subtitle = "Using ICD-10 Mental Health DIagnosis Groupings",
+         caption = "SOURCE: BCBSAZ Adjudicated Claims, Oct 2021 - Sep 2022")+
+    xlab(label = "Cost per Claim (dollars)")+
+    ylab(label = "Number of Claims")
+```
+
+$~$
+
+Descriptive statistics were calculated to further observe the
+distribution and assist in decision making about suppressing outlying
+high cost claims.
+
+$~$
+
+```{r calc_descriptive_statistics1, echo=FALSE, message=FALSE}
+# Descriptive Statistics
+
+```
+
+```{r Tab_DesscriptiveStat1, echo=FALSE, message=FALSE}
+Descriptive_Stats %>%
+  select(n, mean, sd, min, max, skew, kurtosis) %>% 
+gt() %>% 
+  tab_header(
+      title = md("**Descriptive Statistics: Preliminary Analysis**"),
+      subtitle = md("Adjudicated Claim Cost Distribution (October 2021 - September 2022)")
+    ) %>% 
+    opt_align_table_header(align = "left") %>% 
+    fmt_number(columns = c(n),
+               rows = everything(),
+               decimals = 0,
+               sep_mark = ",") %>% 
+    fmt_number(columns = c(skew, kurtosis),
+               rows = everything(),
+               decimals = 3,
+               sep_mark = ",") %>%
+    fmt_currency (columns = c(mean, sd, min, max),
+               rows = everything(),
+               decimals = 0,
+               sep_mark = ",") %>% 
+    # fmt_percent(Percent,
+    #             rows = everything(),
+    #             decimals = 2,
+    #             incl_space = TRUE) %>% 
+    cols_width(n ~ px(100),
+              mean ~ px(100),
+              sd ~ px(100),
+              sd ~ px(100)) %>% 
+    tab_source_note(source_note = md("*SOURCE: BCBSAZ Adjudicated Claims, extracted 12/31/22*")) %>% 
+    tab_style(
+      style = list(
+        cell_fill(color = "#e1e7fa"),
+        cell_text(weight = "bold")
+      ),
+      locations = cells_column_labels(
+        columns = everything()
+      )
+    ) %>% 
+    opt_horizontal_padding(scale = 3)
+```
+
+$~$
+
+The results of these statistics were: Mean =
+`r AllStats$Mean_CalcnetPd`, and Standard Deviation =
+`r AllStats$SD_CalcnetPd`. The statistics confirmed our visual
+observation that there is a negative skew in the data (Skewness =
+`r Descriptive_Stats$skew`); however the shape of the distribution is
+also impacted by a high kurtosis (Kurtosis =
+`r Descriptive_Stats$kurtosis`), or a *heavy upper tail*, due to extreme
+outliers. 
+
+It was therefore determined that outliers beyond 3 standard
+deviations of the mean in either direction will be removed. The outlier
+cutoff, defined as the Mean added to three times the Standard Deviation
+(Cutoff Limit = M + (3 \* SD)), gives us a cutoff limit of +/-
+`r AllStats$Outlier_Cutoff`.
+
+There were a total of `r AllStats$Outliers` outliers removed. The final
+sample size is `r AllStats$n_Stats2` claims.
+
+### *Secondary Analysis*
+
+The histograms were re-constructed utilizing the new data set with
+outliers suppressed. Bin width was again set to \$1000.The new chart for
+the entire sample reveals a more symmetrical distribution with a slight
+skew to the left (Skewness = `r Descriptive_Stats2$skew`). 
+
+$~$
+
+```{r Plot_Histogram_NoOutliers, echo=FALSE, message=FALSE}
+# Cost per claim histogram by Grouping for whole sample
+ggplot(TestTabDx_NoOutliers,
+       aes(x = calcnetpd)) +
+  geom_histogram(
+    binwidth = 1000,
+    color="#000775", 
+    fill="#e1e7fa")+
+  geom_vline(aes(xintercept = mean(calcnetpd)),col="#9a0138",size=.5)+
+  geom_text(x = 13912,
+            y = 8000,
+            label = "Mean = $13,912",
+            color = "#9a0138",
+            hjust  = -.05)+
+  theme_grey()+
+  theme(axis.text.y = element_text(size = 4),
+             #strip.text.y = element_text(angle = 360)
+              )+
+  labs(title = "Histogram: Secondary Analysis, Cost per Claim (Outliers Supressed)",
+      # subtitle = "subtitle",
+       caption = "SOURCE: BCBSAZ Adjudicated Claims, Oct 2021 - Sep 2022")+
+          xlab(label = "Cost per Claim (dollars)")+
+          ylab(label = "Number of Claims")
+```
+
+$~$
+
+
+Updated descriptive statistics were calculated, revealing a new Mean =
+`r AllStats$Mean_CalcnetPd2`, and Standard Deviation =
+`r AllStats$SD_CalcnetPd2`. The mean was not greatly impacted by the
+removal of the outlying values. The kurtosis of the distribution was
+relieved by the removal of the outliers (Kurtosis =
+`r Descriptive_Stats2$kurtosis`).
+
+Altogether, the characteristics of the distribution indicate that this
+data is acceptable to use for predictive analyses.
+
+$~$
+
+```{r Tab_DescriptiveStats2_NoOutliers, echo=FALSE, message=FALSE}
+Descriptive_Stats2 %>%  
+  select(n, mean, sd, min, max, skew, kurtosis) %>% 
+gt()%>% 
+  tab_header(
+      title = md("**Descriptive Statistics: Secondary Analysis**"),
+      subtitle = md("Outliers Removed: Adjudicated Claim Cost Distribution")
+    ) %>% 
+    opt_align_table_header(align = "left") %>% 
+    fmt_number(columns = c(n),
+               rows = everything(),
+               decimals = 0,
+               sep_mark = ",") %>% 
+    fmt_number(columns = c(skew, kurtosis),
+               rows = everything(),
+               decimals = 3,
+               sep_mark = ",") %>%
+    fmt_currency (columns = c(mean, sd, min, max),
+               rows = everything(),
+               decimals = 0,
+               sep_mark = ",") %>% 
+    # fmt_percent(Percent,
+    #             rows = everything(),
+    #             decimals = 2,
+    #             incl_space = TRUE) %>% 
+    cols_width(n ~ px(100),
+              mean ~ px(100),
+              sd ~ px(100),
+              sd ~ px(100)) %>% 
+    tab_source_note(source_note = md("*SOURCE: BCBSAZ Adjudicated Claims, extracted 12/31/22*")) %>% 
+    tab_style(
+      style = list(
+        cell_fill(color = "#e1e7fa"),
+        cell_text(weight = "bold")
+      ),
+      locations = cells_column_labels(
+        columns = everything()
+      )
+    ) %>% 
+    opt_horizontal_padding(scale = 3)
+```
+
+$~$
+
+An expanded histogram was constructed investigating facets of the total
+cost of services including mental health ICD10 code groupings, and
+responsible Alliance Provider. These results again appear to show a
+concentration around (F20-F29) and (F30-F39). While the plot below is
+somewhat complex, the expanded histogram provides additional information
+concerning the frequency of high cost claims for Alliance Providers.
+
+$~$
+
+```{r Plot_ExpandedHistogram_NoOutliers, echo=FALSE, message=FALSE}
+### Cost histogram by ra
+ggplot(TestTabDx_NoOutliers,
+       aes(x = calcnetpd)) +
+  geom_histogram(
+    binwidth = 1000,
+    color="#000775", 
+    fill="#e1e7fa"
+  )+
+  facet_grid(cols = vars(ra),
+             rows = vars(DiagnosisGroupRange))+
+  geom_vline(aes(xintercept = mean(calcnetpd)),col="#9a0138", alpha = .1, size=.5)+
+  geom_text(x = 13912,
+            y = 8000,
+            label = "Mean = $13,912",
+            color = "#9a0138",
+            hjust  = -.05)+
+  theme_grey()+
+  theme(axis.text.y = element_text(size = 6),
+        axis.text.x = element_text(angle = 60,
+                                   hjust = 1,
+                                   size = 8),
+        strip.text.y = element_text(angle = 360)
+        )+
+  labs(title = "Histogram: Cost per Claim by Diagnostic Grouping (Outliers Suppressed)",
+       subtitle = "Using ICD-10 Mental Health DIagnosis Groupings",
+       caption = "Data Source")+
+  xlab(label = "Cost per Claim (dollars)")+
+          ylab(label = "Number of Claims")
+
+```
+
+## Regression Analysis
+
+A multiple linear regression was conducted to test if ICD10 diagnostic
+groupings for mental health significantly predicted the occurrence of
+high cost claims. Preliminary analysis of the data reveals a
+distribution that appears to be more heavily concentrated in the
+psychotic disorders and mood disorders, (F20-F29) and (F30-F39)
+groupings. 
+
+The purpose of this test is to confirm if these groups are
+significant predictors of high cost claims.
+
+### *Preliminary regression analysis*
+
+```{r Regression_InitialRegression1, echo=FALSE, message=FALSE}
+# Regression Analysis Diagnosis Group Range by Calcnetpd
+
+```
+
+The results of the multiple linear regression reveal a significant
+effect of diagnosis group on the occurrence of high cost claims overall
+(*F*(8,3)=16.39, *p*=0.02), with (*R\^2* = 0.918).
+
+This suggests that about **92% of the variation** is predicted by
+diagnostic grouping. (F20-F29) and (F30-F39), psychotic disorders, and
+mood disorders, were the highest predictors, with significance levels of
+*p*=0.043 and *p*=0.013, respectively.
+
+$~$
+
+```{r Tab_Regression_InitialRegression, echo=FALSE, message=FALSE}
+tbl_regression(simple.regression, intercept = TRUE) %>% 
+  as_gt() %>% 
+    tab_header(
+          title = md("**Linear Regression: High Cost Claims Predicted by MH Grouping**"),
+          subtitle = md("*Initial regression includes all groupings*")
+        ) %>%
+    opt_align_table_header(align = "left") %>%
+    tab_source_note(source_note = md("*SOURCE: BCBSAZ Adjudicated Claims, extracted 12/31/22*")) %>% 
+        tab_style(
+          style = list(
+            cell_fill(color = "#e1e7fa"),
+            cell_text(weight = "bold")
+          ),
+          locations = cells_column_labels(
+            columns = everything()
+          )
+        )
+
+```
+
+$~$
+
+The forest plot below provides a visual way to observe the significance
+of predictive variables. For each grouping the horizontal line
+represents the confidence interval. This demonstrates a range of values
+that we can be 95% certain contain the predicted true value. The
+vertical line represents the value at which there is no significant
+effect.
+
+If the confidence interval line crosses the line of null effect, then
+the result is not significant. (F20-29) and (F30-F39) are seen here as
+significant predictors of high cost claims.
+
+$~$
+
+```{r Plot_Forest_Regression_InitialRegression, echo=FALSE, message=FALSE}
+# Forest Plots 
+plot_summs(simple.regression, plot.distributions = TRUE, inner_ci_level = .9)+
+  theme_grey()+
+  geom_vline(aes(xintercept = 0), 
+             color ="#9a0138", 
+             size=.5)+
+  labs(title = "Effect level of Mental HealtH Groupings on High Cost Claims",
+       subtitle = "*Using ICD-10 Mental Health DIagnosis Groupings*",
+       caption = "SOURCE: BCBSAZ Adjudicated Claims, extracted 12/31/22")+
+  xlab(label = "Level of Effect (*Beta*)")+
+  annotate("text", x = 1, y = 8.5, label = "Line of Null Effect")
+
+```
+
+$~$
+
+### Predictive grouping regression analysis
+
+```{r Regression_SecondaryRegression1, echo=FALSE, message=FALSE}
+# Secondary Regression Test
+
+```
+
+The multiple regression equation was updated to focus on the significant
+predictive groupings (F20-F29) and (F30-F39). Overall, the updated
+regression revealed a stronger statistically significant relationship
+(*F*(2,9)=49.55, *p*\<0.001), with (*R\^2* = 0.898) when compared to the
+original regression.
+
+This highly significant result suggests that about **90% of the
+variation** in high cost claim occurrence is predicted by ***these two
+groupings alone***!. 
+
+The value "$\beta$" represent the slope of the
+regression line through the data. The level of significance was set
+to "*p*\<.05", or a 95% Confidence Interval.
+
+It was observed that (F20-F29) was a significant predictor of high cost
+claims ($\beta$=1.2, *p*\<.001).
+
+It was observed that (F30-F39) was a significant predictor of high cost
+claims ($\beta$=1.0, *p*\<.001).
+
+$~$
+
+```{r Tab_Regression_SecondaryRegression, echo=FALSE, message=FALSE}
+tbl_regression(simple.regression2, intercept = TRUE) %>% 
+  as_gt() %>% 
+    tab_header(
+          title = md("**Linear Regression: High Cost Claims Predicted by MH Grouping**"),
+          subtitle = md("*Non-predictive groupings suppressed*")
+        ) %>%
+    opt_align_table_header(align = "left") %>%
+        tab_source_note(source_note = md("*SOURCE: BCBSAZ Adjudicated Claims, extracted 12/31/22*")) %>% 
+        tab_style(
+          style = list(
+            cell_fill(color = "#e1e7fa"),
+            cell_text(weight = "bold")
+          ),
+          locations = cells_column_labels(
+            columns = everything()
+          )
+        )
+
+```
+
+$~$
+
+By suppressing the non-predictive groupings, the significance of the
+predictive value of (F20-F29) and (F30-F39) is more visible. The forest
+plot below demonstrates the distribution of values contained within a
+95% confidence interval for the 2 respective groupings. The
+distributions are closely contained within the confidence interval, indicating that each distribution is statistically significant.
+
+$~$
+
+```{r Plot_Forest_Regression_SecondaryRegression1, echo=FALSE, message=FALSE}
+# secondary regression
+plot_summs(simple.regression2, plot.distributions = TRUE, inner_ci_level = .9)+
+  theme_grey()+
+  geom_vline(aes(xintercept = 0), 
+             color ="#9a0138", 
+             size=.5)+
+  labs(title = "Effect level of Predictive MH Groupings on High Cost Claims)",
+       subtitle = "Using ICD-10 Mental Health DIagnosis Groupings",
+       caption = "SOURCE: BCBSAZ Adjudicated Claims, extracted 12/31/22")+
+  xlab(label = "Level of Effect (Beta)")+
+  annotate("text", x = 0, y = 2.6, 
+           label = "Line of Null Effect",
+           hjust = -0.1)
+  
+```
+
+$~$
+
+# Discussion
+
+## Regression Analysis
+
+The results of the analysis ***confirmed that the mental health
+diagnostic group of the patient is a strong predictor*** for the
+occurrence of high cost claims for inpatient residential services. In
+particular, Schizophrenia, schizotypal, delusional, and other non-mood
+psychotic disorders, and Mood [affective] disorders, (F20-F29) and
+(F30-F39) respectively, were the highest predictors of all groupings,
+accounting for ***90% of the variance*** across over 22,000 adjudicated
+claims for a period of 1 year.
+
+# Conclusion
+
+## Why is this important?
+
+Significant predictors of behaviors, services, and claim costs can be
+hidden among the immense volume of data and clinical work that is
+required to provide quality behavioral health services. It is common
+knowledge in the field that some disorders tend to occur more frequently
+than others in inpatient care. This research allows us to put a name,
+and a significance level to the **top predictors**.
+
+These results also helps us understand the power of psychotic disorders,
+and mood disorders to predict higher cost. These 2 diagnostic groups,
+out of 9, are responsible for **at least 90%** of the variance in our
+sample.
+
+These results provide evidence based decision making power to address
+the clinical and administrative needs of members living with psychotic
+and mood disorders. It also provides the ability to estimate performance
+targets for reduction in inpatient service costs.
+
+## Suggestions for Action
+
+Further investigation into the inpatient experience of members with
+predictive diagnosis is indicated. Areas of emphasis may include:
+
+-   The impact of diagnostic groupings on length of stay
+
+-   The impact of diagnostic groupings on re-admission
+
+-   Frequency and duration of inpatient stays by facility
+
+Additional training could be provided to enable the work force to
+provide care to individuals with disorders that are highly predictive of
+higher cost claims. Collaboration with health medical management
+resources could also help to ensure clear and effective communication
+between the health plan and Alliance Providers.
